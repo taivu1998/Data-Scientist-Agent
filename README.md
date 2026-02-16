@@ -9,7 +9,7 @@
 
 ## Abstract
 
-Large Language Models (LLMs) demonstrate remarkable capabilities in code generation, yet they suffer from a critical flaw when tasked with data visualization: **hallucinated charts**. These models frequently produce code that executes without errors but generates empty, mislabeled, or misleading visualizations—a problem that remains invisible to traditional text-based execution verification.
+Large Language Models (LLMs) demonstrate remarkable capabilities in code generation, yet they suffer from a critical flaw when tasked with data visualization: **hallucinated charts**. These models frequently produce code that executes without errors but generates empty, mislabeled, or misleading visualizations - a problem that remains invisible to traditional text-based execution verification.
 
 **Auto-Analyst** introduces a novel **Multimodal Grounding** architecture that addresses this fundamental limitation. By integrating a Vision-Language Model (VLM) as a "Visual Critic" within the agent loop, our system inspects generated visualizations and provides actionable feedback for self-correction. This research prototype achieves significantly higher success rates on complex plotting tasks compared to standard ReAct-style execution loops.
 
