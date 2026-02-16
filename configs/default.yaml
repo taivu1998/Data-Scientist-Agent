@@ -1,0 +1,21 @@
+experiment_name: "visual_critic_v1"
+seed: 42
+device: "cpu"
+
+agent:
+  model_id: "claude-sonnet-4-20250514"
+  temperature: 0.1
+  max_retries: 3
+  enable_visual_critic: true
+
+sandbox:
+  template: "code-interpreter-v1"
+  timeout: 45
+
+data:
+  benchmark_path: "data/golden_set.json"
+  csv_dir: "data/csvs/"
+
+logging:
+  log_dir: "logs/"
+  save_artifacts: true

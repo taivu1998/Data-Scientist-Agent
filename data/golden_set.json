@@ -1,0 +1,82 @@
+[
+    {
+        "id": "easy_1",
+        "query": "Load the data and tell me the number of rows and columns.",
+        "csv_name": "salaries.csv",
+        "type": "text",
+        "difficulty": "easy",
+        "expected_output_contains": ["25", "6"]
+    },
+    {
+        "id": "easy_2",
+        "query": "What are the column names in this dataset?",
+        "csv_name": "salaries.csv",
+        "type": "text",
+        "difficulty": "easy",
+        "expected_output_contains": ["Job Title", "Salary", "Experience", "Department"]
+    },
+    {
+        "id": "easy_3",
+        "query": "Show me the first 5 rows of the data.",
+        "csv_name": "salaries.csv",
+        "type": "text",
+        "difficulty": "easy",
+        "expected_output_contains": ["Software Engineer", "Data Scientist"]
+    },
+    {
+        "id": "medium_1",
+        "query": "Group by 'Department' and calculate the average salary for each group. Show the results sorted by average salary descending.",
+        "csv_name": "salaries.csv",
+        "type": "text",
+        "difficulty": "medium",
+        "expected_output_contains": ["Engineering", "Analytics"]
+    },
+    {
+        "id": "medium_2",
+        "query": "Create a bar chart showing average salary by Department. Include a title and axis labels.",
+        "csv_name": "salaries.csv",
+        "type": "plot",
+        "difficulty": "medium",
+        "expected_visual": "bar_chart"
+    },
+    {
+        "id": "medium_3",
+        "query": "Plot a histogram of the Salary distribution with 10 bins. Add a title.",
+        "csv_name": "salaries.csv",
+        "type": "plot",
+        "difficulty": "medium",
+        "expected_visual": "histogram"
+    },
+    {
+        "id": "medium_4",
+        "query": "Create a scatter plot of Experience (x-axis) vs Salary (y-axis). Add a title and axis labels.",
+        "csv_name": "salaries.csv",
+        "type": "plot",
+        "difficulty": "medium",
+        "expected_visual": "scatter"
+    },
+    {
+        "id": "hard_1",
+        "query": "Plot Salary vs Experience using a logarithmic scale on the Y-axis. The chart must have a title, labeled axes, and use log scale.",
+        "csv_name": "salaries.csv",
+        "type": "plot_log_check",
+        "difficulty": "hard",
+        "expected_visual": "scatter_log"
+    },
+    {
+        "id": "hard_2",
+        "query": "Create a box plot of Salary grouped by Department. Include a descriptive title, rotate x-axis labels for readability, and use a clean style.",
+        "csv_name": "salaries.csv",
+        "type": "plot",
+        "difficulty": "hard",
+        "expected_visual": "boxplot"
+    },
+    {
+        "id": "hard_3",
+        "query": "Create a heatmap showing the correlation matrix between all numeric columns (Salary, Experience). Use a color scale and add annotations showing correlation values.",
+        "csv_name": "salaries.csv",
+        "type": "plot",
+        "difficulty": "hard",
+        "expected_visual": "heatmap"
+    }
+]
