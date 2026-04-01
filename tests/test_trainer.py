@@ -83,6 +83,14 @@ class TestTrainerMetrics:
                     "execution_success": 0,
                     "failures": 0,
                 },
+                "plot_log_check": {
+                    "total": 0,
+                    "pass_at_1": 0,
+                    "pass_at_3": 0,
+                    "pass_refined": 0,
+                    "execution_success": 0,
+                    "failures": 0,
+                },
             },
         }
 
@@ -90,6 +98,7 @@ class TestTrainerMetrics:
         assert "easy" in metrics["by_difficulty"]
         assert "by_type" in metrics
         assert "text" in metrics["by_type"]
+        assert "plot_log_check" in metrics["by_type"]
 
     def test_calculate_final_metrics_rates(self):
         """Test that final metrics calculates rates correctly."""
@@ -136,11 +145,19 @@ class TestTrainerMetrics:
                     "failures": 0,
                 },
                 "plot": {
-                    "total": 6,
+                    "total": 5,
                     "pass_at_1": 2,
                     "pass_at_3": 3,
                     "pass_refined": 4,
-                    "execution_success": 5,
+                    "execution_success": 4,
+                    "failures": 1,
+                },
+                "plot_log_check": {
+                    "total": 1,
+                    "pass_at_1": 0,
+                    "pass_at_3": 0,
+                    "pass_refined": 0,
+                    "execution_success": 1,
                     "failures": 1,
                 },
             },
@@ -161,6 +178,17 @@ class TestTrainerMetrics:
         assert expected_rates["pass_refined_rate"] == 80.0
         assert expected_rates["execution_success_rate"] == 90.0
         assert expected_rates["failure_rate"] == 10.0
+
+    def test_plot_log_check_is_counted_in_type_totals(self):
+        """Type totals should include plot_log_check tasks."""
+        from src.trainer import Trainer
+
+        trainer = Trainer.__new__(Trainer)
+        metrics = trainer._initialize_metrics()
+
+        total_by_type = sum(bucket["total"] for bucket in metrics["by_type"].values())
+        assert "plot_log_check" in metrics["by_type"]
+        assert total_by_type == 0
 
     def test_calculate_final_metrics_empty(self):
         """Test that empty metrics returns as-is."""

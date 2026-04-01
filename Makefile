@@ -59,13 +59,13 @@ clean:
 
 # Testing
 test:
-	pytest tests/ -v
+	python -m pytest tests/ -v
 
 test-unit:
-	pytest tests/ -v --ignore=tests/test_integration.py
+	python -m pytest tests/ -v --ignore=tests/test_integration.py
 
 test-integration:
-	pytest tests/test_integration.py -v -m integration
+	python -m pytest tests/test_integration.py -v -m integration
 
 # Code quality
 lint:

@@ -90,3 +90,7 @@ output.png
 # Project specific
 data/csvs/*.csv
 !data/csvs/salaries.csv
+
+# Local analysis notes
+LOCAL_CODEBASE_UNDERSTANDING.md
+LOCAL_IMPROVEMENT_PLAN.md

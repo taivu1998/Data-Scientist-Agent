@@ -226,6 +226,43 @@ class TestOutputValidator:
         assert is_valid is False
         assert "error" in feedback.lower()
 
+    def test_warning_only_stderr_does_not_fail_validation(self):
+        """Warning-only stderr should not count as execution failure."""
+        validator = OutputValidator()
+
+        task = {"id": "test_1", "type": "text", "expected_output_contains": ["25", "rows"]}
+        exec_result = {
+            "status": "warning",
+            "stdout": "Data has 25 rows",
+            "stderr": "RuntimeWarning: something minor happened",
+            "error": None,
+            "warnings": ["RuntimeWarning: something minor happened"],
+            "image_base64": None,
+        }
+
+        is_valid, feedback = validator.validate_task(task, exec_result, "")
+
+        assert is_valid is True
+        assert "validated" in feedback.lower()
+
+    def test_validate_task_result_fails_when_unsolved(self):
+        """Final validation should fail if the agent did not mark the task solved."""
+        validator = OutputValidator()
+        task = {"id": "test_1", "type": "text", "expected_output_contains": ["25", "rows"]}
+        exec_result = {
+            "status": "success",
+            "stdout": "Data has 25 rows",
+            "stderr": "",
+            "error": None,
+            "warnings": [],
+            "image_base64": None,
+        }
+
+        result = validator.validate_task_result(task, exec_result, "", is_solved=False)
+
+        assert result.passed is False
+        assert "did not mark" in result.summary.lower()
+
     def test_validate_with_visual_feedback_warning(self):
         """Should fail when visual feedback has warning."""
         validator = OutputValidator()

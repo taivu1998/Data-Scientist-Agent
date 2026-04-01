@@ -1,9 +1,10 @@
+import logging
+import operator
 import os
 import re
-import logging
 import sys
-from typing import TypedDict, List, Optional
-import operator
+from dataclasses import dataclass
+from typing import Any, List, Optional, TypedDict
 
 # Annotated was added in Python 3.9, use typing_extensions for older versions
 if sys.version_info >= (3, 9):
@@ -11,9 +12,36 @@ if sys.version_info >= (3, 9):
 else:
     from typing_extensions import Annotated
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, BaseMessage
-from langgraph.graph import StateGraph, END
+try:
+    from langchain_anthropic import ChatAnthropic
+except ImportError:  # pragma: no cover - exercised in dependency-light environments
+    ChatAnthropic = None
+
+try:
+    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+except ImportError:  # pragma: no cover - exercised in dependency-light environments
+    @dataclass
+    class BaseMessage:
+        content: Any
+
+    @dataclass
+    class HumanMessage(BaseMessage):
+        pass
+
+    @dataclass
+    class SystemMessage(BaseMessage):
+        pass
+
+    @dataclass
+    class AIMessage(BaseMessage):
+        pass
+
+try:
+    from langgraph.graph import END, StateGraph
+except ImportError:  # pragma: no cover - exercised in dependency-light environments
+    END = "__end__"
+    StateGraph = None
+
 from pydantic import BaseModel, Field
 
 from src.sandbox import SandboxWrapper
@@ -21,7 +49,6 @@ from src.sandbox import SandboxWrapper
 logger = logging.getLogger(__name__)
 
 
-# --- Structured Output for Visual Critic ---
 class VisualCritique(BaseModel):
     """Structured output for visual verification."""
 
@@ -32,7 +59,6 @@ class VisualCritique(BaseModel):
     feedback: str = Field(description="Specific feedback for improvement if needed")
 
 
-# --- State Definition ---
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     context_data: str
@@ -40,23 +66,34 @@ class AgentState(TypedDict):
     execution_result: dict
     retry_count: int
     is_solved: bool
-    original_query: str  # Preserve original query
+    original_query: str
+    task_type: str
 
 
-# --- The Agent Architecture ---
 class AnalystAgent:
     """
     A Graph-based Autonomous Agent for Data Analysis.
     Architecture: Plan -> Code -> Execute -> VisualVerify -> Refine -> END
-
-    Features:
-    - Stateful execution in Firecracker microVM sandbox (E2B)
-    - Multimodal grounding via Visual Critic loop
-    - Semantic compression of dataset context
     """
+
+    VISUAL_TASK_TYPES = {"plot", "plot_log_check"}
+    VISUAL_QUERY_KEYWORDS = (
+        "plot",
+        "chart",
+        "graph",
+        "histogram",
+        "scatter",
+        "heatmap",
+        "box plot",
+        "boxplot",
+        "bar chart",
+        "visualize",
+        "visualise",
+    )
 
     def __init__(self, config: dict):
         self.config = config
+        self._ensure_runtime_dependencies()
         self.model = ChatAnthropic(
             model=config["agent"]["model_id"],
             temperature=config["agent"]["temperature"],
@@ -64,13 +101,26 @@ class AnalystAgent:
         )
         self.visual_critic = self.model.with_structured_output(VisualCritique)
         self.sandbox_wrapper: Optional[SandboxWrapper] = None
+        self._critic_failure_mode = config["agent"].get("critic_failure_mode", "best_effort")
         self.workflow = self._build_graph()
 
+    def _ensure_runtime_dependencies(self):
+        missing = []
+        if ChatAnthropic is None:
+            missing.append("langchain-anthropic")
+        if StateGraph is None:
+            missing.append("langgraph")
+
+        if missing:
+            raise RuntimeError(
+                "AnalystAgent requires runtime dependencies that are not installed: "
+                + ", ".join(missing)
+            )
+
     def _build_graph(self):
-        """Constructs the LangGraph State Machine."""
+        """Constructs the LangGraph state machine."""
         workflow = StateGraph(AgentState)
 
-        # Nodes: Plan -> Code -> Execute -> VisualVerify -> Refine
         workflow.add_node("planner", self.plan_node)
         workflow.add_node("coder", self.code_node)
         workflow.add_node("executor", self.execute_node)
@@ -78,42 +128,44 @@ class AnalystAgent:
         workflow.add_node("refiner", self.refine_node)
 
         workflow.set_entry_point("planner")
-
         workflow.add_edge("planner", "coder")
         workflow.add_edge("coder", "executor")
 
-        # Conditional edge based on execution result
         workflow.add_conditional_edges(
             "executor",
             self.should_continue,
             {"verify": "visual_critic", "retry": "refiner", "end": END},
         )
-
-        # Visual critic routes to refiner or end
         workflow.add_conditional_edges(
             "visual_critic", self.critic_router, {"refine": "refiner", "end": END}
         )
-
-        # Refiner always goes back to coder for another attempt
         workflow.add_edge("refiner", "coder")
 
         return workflow.compile()
 
-    def run(self, query: str, context: str, sandbox: SandboxWrapper) -> AgentState:
+    def run(
+        self,
+        query: str,
+        context: str,
+        sandbox: SandboxWrapper,
+        task_type: Optional[str] = None,
+        critic_failure_mode: Optional[str] = None,
+    ) -> AgentState:
         """
         Main entry point to run the agent.
 
         Args:
             query: The user's data analysis query
             context: Semantic context extracted from the dataset
-            sandbox: The E2B sandbox wrapper for code execution
-
-        Returns:
-            The final agent state after execution
+            sandbox: The execution sandbox wrapper
+            task_type: Optional task type hint (text, plot, plot_log_check)
+            critic_failure_mode: Optional override for critic failures (strict or best_effort)
         """
         self.sandbox_wrapper = sandbox
+        self._critic_failure_mode = (
+            critic_failure_mode or self.config["agent"].get("critic_failure_mode", "best_effort")
+        )
 
-        # Initialize the DataFrame in the sandbox
         self._setup_sandbox_environment()
 
         initial_state: AgentState = {
@@ -124,6 +176,7 @@ class AnalystAgent:
             "retry_count": 0,
             "is_solved": False,
             "original_query": query,
+            "task_type": task_type or "",
         }
 
         try:
@@ -133,7 +186,14 @@ class AnalystAgent:
             logger.error(f"Agent execution failed: {e}")
             return {
                 **initial_state,
-                "execution_result": {"error": str(e), "stderr": str(e)},
+                "execution_result": {
+                    "status": "error",
+                    "error": str(e),
+                    "stderr": str(e),
+                    "stdout": "",
+                    "image_base64": None,
+                    "warnings": [],
+                },
                 "is_solved": False,
             }
 
@@ -153,19 +213,12 @@ df = pd.read_csv('data.csv')
 print(f"DataFrame loaded: {df.shape[0]} rows, {df.shape[1]} columns")
 """
         result = self.sandbox_wrapper.run_code(setup_code)
-        if result.get("error"):
+        if result.get("status") == "error":
             logger.warning(f"Sandbox setup warning: {result.get('stderr', '')}")
 
-    # --- Nodes ---
-
     def plan_node(self, state: AgentState) -> dict:
-        """
-        Planning node: Analyzes the request and creates an execution plan.
-        Preserves the original query in state.
-        """
-        query = (
-            state["original_query"] if state.get("original_query") else state["messages"][0].content
-        )
+        """Analyze the request and create an execution plan."""
+        query = state.get("original_query") or state["messages"][0].content
         context = state.get("context_data", "")
 
         plan_prompt = f"""
@@ -176,7 +229,7 @@ Dataset Context:
 
 User Query: {query}
 
-Provide a 2-3 step plan for how to answer this query with Python code.
+Provide a concise 2-3 step plan for how to answer this query with Python code.
 """
         try:
             response = self.model.invoke([HumanMessage(content=plan_prompt)])
@@ -188,16 +241,18 @@ Provide a 2-3 step plan for how to answer this query with Python code.
         return {"messages": [SystemMessage(content=f"Plan: {plan}")], "original_query": query}
 
     def code_node(self, state: AgentState) -> dict:
-        """Generates Python code based on query, context, and any previous errors."""
+        """Generate Python code based on query, context, and prior guidance."""
         query = state.get("original_query", state["messages"][0].content)
         context = state.get("context_data", "")
         prev_res = state.get("execution_result", {})
         retry_count = state.get("retry_count", 0)
+        guidance = self._build_guidance_from_messages(state.get("messages", []))
 
-        # Build error context for self-healing
         error_context = ""
-        if prev_res.get("stderr"):
-            error_context = f"\nPrevious Error (fix this): {prev_res['stderr']}"
+        if prev_res.get("error"):
+            error_context += f"\nPrevious Runtime Error (fix this): {prev_res['error']}"
+        if prev_res.get("stderr") and prev_res.get("status") == "error":
+            error_context += f"\nPrevious Stderr (fix this): {prev_res['stderr']}"
         if prev_res.get("visual_feedback"):
             error_context += f"\nVisual Feedback (address this): {prev_res['visual_feedback']}"
 
@@ -207,12 +262,17 @@ Dataset Context:
 {context}
 
 User Query: {query}
+
+Structured Guidance:
+{guidance}
+
+Attempt Number: {retry_count + 1}
 {error_context}
 
 IMPORTANT RULES:
 1. Write ONLY valid Python code - no markdown, no explanations
 2. The DataFrame 'df' is already loaded from 'data.csv' - do NOT reload it
-3. For plots: use plt.savefig() is NOT needed - just create the plot and call plt.show()
+3. For plots: create the plot and call plt.show()
 4. For text answers: use print() to output results
 5. Handle potential errors gracefully (e.g., check column existence)
 6. If creating plots, always include: title, axis labels, and legend if applicable
@@ -238,47 +298,74 @@ Write the Python code now:
         }
 
     def execute_node(self, state: AgentState) -> dict:
-        """Runs code in the Firecracker Sandbox."""
+        """Run code in the execution sandbox."""
         code = state.get("generated_code", "")
+        expects_visual = self._expects_visual_output(
+            state.get("original_query", ""), state.get("task_type", "")
+        )
 
         if not code:
             return {
                 "execution_result": {
+                    "status": "error",
                     "error": "No code to execute",
                     "stdout": "",
                     "stderr": "No code was generated",
                     "image_base64": None,
-                }
+                    "warnings": [],
+                },
+                "is_solved": False,
             }
 
         try:
             result = self.sandbox_wrapper.run_code(code)
         except Exception as e:
             logger.error(f"Sandbox execution failed: {e}")
-            result = {"error": str(e), "stdout": "", "stderr": str(e), "image_base64": None}
+            result = {
+                "status": "error",
+                "error": str(e),
+                "stdout": "",
+                "stderr": str(e),
+                "image_base64": None,
+                "warnings": [],
+            }
 
-        return {"execution_result": result}
+        is_solved = False
+        if result.get("status") != "error":
+            if expects_visual:
+                if result.get("image_base64") and not self.config["agent"].get(
+                    "enable_visual_critic", True
+                ):
+                    is_solved = True
+            else:
+                is_solved = True
+
+        return {"execution_result": result, "is_solved": is_solved}
 
     def visual_critic_node(self, state: AgentState) -> dict:
-        """
-        The Research Twist: Multimodal Visual Verification.
-        Uses VLM with structured output to verify that generated charts actually answer the query.
-        """
+        """Use the VLM with structured output to verify generated charts."""
         if not self.config["agent"].get("enable_visual_critic", True):
-            return {"is_solved": True}
+            return {
+                "execution_result": {
+                    **state["execution_result"],
+                    "critic_status": "disabled",
+                    "visual_feedback": "Visual critic disabled for this run.",
+                },
+                "is_solved": True,
+            }
 
         image_data = state["execution_result"].get("image_base64")
         if not image_data:
             return {
                 "execution_result": {
                     **state["execution_result"],
+                    "critic_status": "missing_image",
                     "visual_feedback": "Warning: No image was generated for a visual query.",
                 },
                 "is_solved": False,
             }
 
         query = state.get("original_query", "")
-
         critique_prompt = f"""You are a data visualization critic. Analyze this chart and provide structured feedback.
 
 Original Query: "{query}"
@@ -302,11 +389,11 @@ Evaluate and return JSON with these exact fields:
             )
 
             critique = self.visual_critic.invoke([msg])
-
             if not critique.is_valid:
                 return {
                     "execution_result": {
                         **state["execution_result"],
+                        "critic_status": "invalid",
                         "visual_feedback": (
                             f"Title: {critique.has_title}, Labels: {critique.has_labels}, "
                             f"Data: {critique.has_data}. Feedback: {critique.feedback}"
@@ -318,6 +405,7 @@ Evaluate and return JSON with these exact fields:
             return {
                 "execution_result": {
                     **state["execution_result"],
+                    "critic_status": "passed",
                     "visual_feedback": f"Validated: {critique.feedback}",
                 },
                 "is_solved": True,
@@ -325,55 +413,62 @@ Evaluate and return JSON with these exact fields:
 
         except Exception as e:
             logger.error(f"Visual critic failed: {e}")
-            return {"is_solved": True}
+            updated_result = {
+                **state["execution_result"],
+                "critic_status": "error",
+                "critic_error": str(e),
+                "visual_feedback": f"Warning: Visual critic failed: {e}",
+            }
+            if self._critic_failure_mode == "strict":
+                return {"execution_result": updated_result, "is_solved": False}
+            return {"execution_result": updated_result, "is_solved": True}
 
     def refine_node(self, state: AgentState) -> dict:
-        """
-        Refine node: Analyzes errors and prepares context for code regeneration.
-        This is the feedback integration step before retrying.
-        """
+        """Prepare targeted retry context from execution and visual feedback."""
         exec_result = state.get("execution_result", {})
         retry_count = state.get("retry_count", 0)
-
-        # Compile all feedback
         error_summary = []
 
         if exec_result.get("error"):
             error_summary.append(f"Runtime Error: {exec_result['error']}")
-        if exec_result.get("stderr"):
+        if exec_result.get("stderr") and exec_result.get("status") == "error":
             error_summary.append(f"Stderr: {exec_result['stderr']}")
+        if exec_result.get("warnings"):
+            error_summary.append(f"Warnings: {' | '.join(exec_result['warnings'])}")
         if exec_result.get("visual_feedback"):
             error_summary.append(f"Visual Feedback: {exec_result['visual_feedback']}")
 
         feedback_msg = " | ".join(error_summary) if error_summary else "Unknown issue"
-
         logger.info(f"Refine node (attempt {retry_count}): {feedback_msg}")
-
         return {"messages": [SystemMessage(content=f"Refinement needed: {feedback_msg}")]}
 
-    # --- Edge Routing Functions ---
-
     def should_continue(self, state: AgentState) -> str:
-        """Determines next step after execution."""
+        """Determine the next step after execution."""
         res = state.get("execution_result", {})
         retry_count = state.get("retry_count", 0)
         max_retries = self.config["agent"].get("max_retries", 3)
+        expects_visual = self._expects_visual_output(
+            state.get("original_query", ""), state.get("task_type", "")
+        )
 
-        # Check for errors
-        if res.get("error") or res.get("stderr"):
+        if res.get("status") == "error":
             if retry_count < max_retries:
                 return "retry"
             return "end"
 
-        # If an image was generated, verify it
-        if res.get("image_base64"):
-            return "verify"
+        if expects_visual:
+            if res.get("image_base64"):
+                if self.config["agent"].get("enable_visual_critic", True):
+                    return "verify"
+                return "end"
+            if retry_count < max_retries:
+                return "retry"
+            return "end"
 
-        # Text-only output, mark as solved
         return "end"
 
     def critic_router(self, state: AgentState) -> str:
-        """Routes after visual criticism."""
+        """Route after visual criticism."""
         is_solved = state.get("is_solved", True)
         retry_count = state.get("retry_count", 0)
         max_retries = self.config["agent"].get("max_retries", 3)
@@ -382,18 +477,36 @@ Evaluate and return JSON with these exact fields:
             return "refine"
         return "end"
 
+    def _build_guidance_from_messages(self, messages: List[BaseMessage]) -> str:
+        guidance_blocks = []
+        for message in messages:
+            if not isinstance(message, SystemMessage):
+                continue
+            content = getattr(message, "content", "")
+            if isinstance(content, str) and (
+                content.startswith("Plan:") or content.startswith("Refinement needed:")
+            ):
+                guidance_blocks.append(content)
+
+        if not guidance_blocks:
+            return "No prior planning or refinement context."
+        return "\n".join(guidance_blocks[-3:])
+
+    def _expects_visual_output(self, query: str, task_type: str) -> bool:
+        if task_type in self.VISUAL_TASK_TYPES:
+            return True
+
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in self.VISUAL_QUERY_KEYWORDS)
+
     def _extract_code(self, content: str) -> str:
-        """
-        Extracts Python code from LLM response.
-        Handles markdown code blocks and raw code.
-        """
+        """Extract Python code from an LLM response."""
         if not content:
             return ""
 
-        # Try to extract from markdown code block
         patterns = [
-            r"```python\s*(.*?)\s*```",  # ```python ... ```
-            r"```\s*(.*?)\s*```",  # ``` ... ```
+            r"```python\s*(.*?)\s*```",
+            r"```\s*(.*?)\s*```",
         ]
 
         for pattern in patterns:
@@ -401,14 +514,11 @@ Evaluate and return JSON with these exact fields:
             if match:
                 return match.group(1).strip()
 
-        # If no code block found, assume entire content is code
-        # Remove any leading/trailing explanation text
         lines = content.strip().split("\n")
         code_lines = []
         in_code = False
 
         for line in lines:
-            # Skip obvious explanation lines
             if line.strip().startswith("#") or any(
                 line.strip().lower().startswith(word)
                 for word in ["here", "this", "the", "i ", "note:", "output:"]
@@ -416,7 +526,6 @@ Evaluate and return JSON with these exact fields:
                 if not in_code:
                     continue
 
-            # Detect start of actual code
             if any(keyword in line for keyword in ["import ", "df", "plt.", "print(", "pd.", "="]):
                 in_code = True
 

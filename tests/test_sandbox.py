@@ -131,3 +131,25 @@ class TestSandboxFileOperations:
         # This would fail in reality but we test the interface
         # The actual file read happens in the method
         assert os.path.exists(str(test_file))
+
+
+class TestSandboxStderrClassification:
+    """Test stderr normalization into warnings vs errors."""
+
+    def test_warning_stderr_is_classified_as_warning(self):
+        from src.sandbox import SandboxWrapper
+
+        status = SandboxWrapper._classify_stderr("RuntimeWarning: divide by zero encountered")
+        assert status == "warning"
+
+    def test_error_stderr_is_classified_as_error(self):
+        from src.sandbox import SandboxWrapper
+
+        status = SandboxWrapper._classify_stderr("ModuleNotFoundError: No module named 'x'")
+        assert status == "error"
+
+    def test_unknown_stderr_defaults_to_error(self):
+        from src.sandbox import SandboxWrapper
+
+        status = SandboxWrapper._classify_stderr("Unhandled failure in kernel transport")
+        assert status == "error"

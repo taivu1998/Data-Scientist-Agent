@@ -11,6 +11,8 @@ import pytest
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.model import AIMessage, AnalystAgent, HumanMessage, SystemMessage
+
 
 class TestCodeExtraction:
     """Test the code extraction logic (independent of langchain)."""
@@ -246,3 +248,126 @@ Write the Python code now:
 
         for element in expected_elements:
             assert element in prompt_template, f"Missing element: {element}"
+
+
+class DummySandbox:
+    def __init__(self, result):
+        self.result = result
+
+    def run_code(self, code):
+        return dict(self.result)
+
+
+class StubModel:
+    def __init__(self, content):
+        self.content = content
+        self.last_prompt = None
+
+    def invoke(self, messages):
+        self.last_prompt = messages[0].content
+
+        class Response:
+            def __init__(self, content):
+                self.content = content
+
+        return Response(self.content)
+
+
+class RaisingCritic:
+    def invoke(self, messages):
+        raise RuntimeError("critic unavailable")
+
+
+class TestAgentRoutingAndPrompting:
+    def make_agent(self, enable_visual_critic=True):
+        agent = AnalystAgent.__new__(AnalystAgent)
+        agent.config = {
+            "agent": {
+                "enable_visual_critic": enable_visual_critic,
+                "max_retries": 3,
+                "critic_failure_mode": "best_effort",
+            }
+        }
+        agent._critic_failure_mode = "best_effort"
+        return agent
+
+    def test_execute_node_marks_text_tasks_solved(self):
+        agent = self.make_agent()
+        agent.sandbox_wrapper = DummySandbox(
+            {
+                "status": "success",
+                "stdout": "25 rows",
+                "stderr": "",
+                "error": None,
+                "image_base64": None,
+                "warnings": [],
+            }
+        )
+
+        state = {
+            "generated_code": "print(df.shape)",
+            "original_query": "How many rows are in the dataset?",
+            "task_type": "text",
+        }
+
+        result = agent.execute_node(state)
+
+        assert result["is_solved"] is True
+        assert result["execution_result"]["status"] == "success"
+
+    def test_should_continue_retries_visual_tasks_without_image(self):
+        agent = self.make_agent(enable_visual_critic=True)
+        state = {
+            "execution_result": {
+                "status": "success",
+                "stdout": "",
+                "stderr": "",
+                "error": None,
+                "image_base64": None,
+                "warnings": [],
+            },
+            "retry_count": 1,
+            "original_query": "Create a bar chart of salary by department.",
+            "task_type": "plot",
+        }
+
+        assert agent.should_continue(state) == "retry"
+
+    def test_visual_critic_failure_is_unsolved_in_strict_mode(self):
+        agent = self.make_agent(enable_visual_critic=True)
+        agent.visual_critic = RaisingCritic()
+        agent._critic_failure_mode = "strict"
+
+        state = {
+            "execution_result": {"image_base64": "fake_image", "status": "success"},
+            "original_query": "Create a bar chart.",
+        }
+
+        result = agent.visual_critic_node(state)
+
+        assert result["is_solved"] is False
+        assert result["execution_result"]["critic_status"] == "error"
+
+    def test_code_node_uses_plan_and_refinement_messages(self):
+        agent = self.make_agent()
+        stub_model = StubModel("print('done')")
+        agent.model = stub_model
+
+        state = {
+            "messages": [
+                HumanMessage(content="Create a chart"),
+                SystemMessage(content="Plan: 1. group data 2. plot result"),
+                SystemMessage(content="Refinement needed: add title and labels"),
+                AIMessage(content="Generated code"),
+            ],
+            "original_query": "Create a chart",
+            "context_data": "Dataset Shape: 25 rows x 6 columns",
+            "execution_result": {},
+            "retry_count": 1,
+        }
+
+        result = agent.code_node(state)
+
+        assert "Plan: 1. group data 2. plot result" in stub_model.last_prompt
+        assert "Refinement needed: add title and labels" in stub_model.last_prompt
+        assert "print('done')" in result["generated_code"]
